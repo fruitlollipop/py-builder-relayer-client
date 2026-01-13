@@ -1,68 +1,29 @@
-from typing import List
-from poly_eip712_structs import make_domain
-from eth_abi.packed import encode_packed
+"""
+SAFE transaction building
+"""
+
+from typing import List, Optional
+from eth_account.messages import encode_structured_data
 from hexbytes import HexBytes
 
-from ..config import ContractConfig
+from ..config import SafeContractConfig
 from ..models import (
     SafeTransaction,
     OperationType,
     TransactionRequest,
     SafeTransactionArgs,
-    SplitSig,
     SignatureParams,
     TransactionType,
 )
 from ..encode.safe import create_safe_multisend_transaction
-from .derive import derive
-from ..signer import Signer
-from ..model.safe_tx import SafeTx
+from .derive import derive_safe
 from ..constants.constants import ZERO_ADDRESS
+from ..utils import split_and_pack_sig
 
 
-def aggregate_transaction(
-    txns: List[SafeTransaction], safe_multisend: str
-) -> SafeTransaction:
-    """Aggregate multiple transactions into a single transaction"""
-    if len(txns) == 1:
-        return txns[0]
-    else:
-        return create_safe_multisend_transaction(txns, safe_multisend)
-
-
-def split_signature(sig_hex: str) -> SplitSig:
-    sig = HexBytes(sig_hex)
-    if len(sig) != 65:
-        raise ValueError(f"Invalid signature length: expected 65 bytes, got {len(sig)}")
-
-    r = int.from_bytes(sig[0:32], "big")
-    s = int.from_bytes(sig[32:64], "big")
-    v_raw = sig[64]
-
-    if v_raw in (0, 1):
-        v = v_raw + 31
-    elif v_raw in (27, 28):
-        v = v_raw + 4
-    else:
-        raise ValueError("Invalid signature 'v' (expected 0,1,27,28)")
-
-    return SplitSig(r=r, s=s, v=v)
-
-
-def split_and_pack_sig(sig_hex: str) -> str:
-    split_sig = split_signature(sig_hex)
-    r = int(split_sig.r)
-    s = int(split_sig.s)
-    v = int(split_sig.v)
-    packed = encode_packed(["uint256", "uint256", "uint8"], [r, s, v])
-    return "0x" + packed.hex()
-
-
-def create_safe_signature(signer: Signer, struct_hash: str) -> str:
-    """
-    Signs a struct hash to generate a safe signature
-    """
-    return signer.sign_eip712_struct_hash(struct_hash)
+def create_safe_signature(signer, struct_hash: str) -> str:
+    """Signs a struct hash to generate a safe signature"""
+    return signer.sign_message(struct_hash)
 
 
 def create_struct_hash(
@@ -78,47 +39,87 @@ def create_struct_hash(
     gas_token: str,
     refund_receiver: str,
     nonce: str,
-) -> bytes:
-    """
-    Creates a Safe struct hash
-    """
-    safe_tx = SafeTx(
-        to=to,
-        value=int(value),
-        data=data,
-        operation=operation.value,
-        safeTxGas=int(safe_tx_gas),
-        baseGas=int(base_gas),
-        gasPrice=int(gas_price),
-        gasToken=gas_token,
-        refundReceiver=refund_receiver,
-        nonce=int(nonce),
-    )
-    return safe_tx.generate_struct_hash(
-        make_domain(verifyingContract=safe, chainId=chain_id)
-    )
+) -> str:
+    """Creates a Safe struct hash using EIP-712"""
+    domain = {
+        "chainId": chain_id,
+        "verifyingContract": safe,
+    }
+
+    types = {
+        "EIP712Domain": [
+            {"name": "chainId", "type": "uint256"},
+            {"name": "verifyingContract", "type": "address"},
+        ],
+        "SafeTx": [
+            {"name": "to", "type": "address"},
+            {"name": "value", "type": "uint256"},
+            {"name": "data", "type": "bytes"},
+            {"name": "operation", "type": "uint8"},
+            {"name": "safeTxGas", "type": "uint256"},
+            {"name": "baseGas", "type": "uint256"},
+            {"name": "gasPrice", "type": "uint256"},
+            {"name": "gasToken", "type": "address"},
+            {"name": "refundReceiver", "type": "address"},
+            {"name": "nonce", "type": "uint256"},
+        ],
+    }
+
+    values = {
+        "to": to,
+        "value": int(value),
+        "data": HexBytes(data),
+        "operation": operation.value,
+        "safeTxGas": int(safe_tx_gas),
+        "baseGas": int(base_gas),
+        "gasPrice": int(gas_price),
+        "gasToken": gas_token,
+        "refundReceiver": refund_receiver,
+        "nonce": int(nonce),
+    }
+
+    # Create EIP-712 structured data
+    structured_data = {
+        "types": types,
+        "primaryType": "SafeTx",
+        "domain": domain,
+        "message": values,
+    }
+
+    # Hash the structured data
+    encoded = encode_structured_data(structured_data)
+    return encoded.hex()
+
+
+def aggregate_transaction(txns: List[SafeTransaction], safe_multisend: str) -> SafeTransaction:
+    """Aggregate multiple transactions into a single transaction"""
+    if len(txns) == 1:
+        return txns[0]
+    else:
+        return create_safe_multisend_transaction(txns, safe_multisend)
 
 
 def build_safe_transaction_request(
-    signer: Signer,
+    signer,
     args: SafeTransactionArgs,
-    config: ContractConfig,
-    metadata: str = None,
+    safe_contract_config: SafeContractConfig,
+    metadata: Optional[str] = None,
 ) -> TransactionRequest:
     """
     Generate a Safe Transaction Request for the Relayer API
     """
-    factory = config.safe_factory
-    multisend = config.safe_multisend
-    transaction = aggregate_transaction(args.transactions, multisend)
+    safe_factory = safe_contract_config.safe_factory
+    safe_multisend = safe_contract_config.safe_multisend
+    transaction = aggregate_transaction(args.transactions, safe_multisend)
     safe_txn_gas = "0"
     base_gas = "0"
     gas_price = "0"
     gas_token = ZERO_ADDRESS
     refund_receiver = ZERO_ADDRESS
-    safe_address = derive(args.from_address, factory)
 
-    # generate the safe struct hash
+    safe_address = derive_safe(args.from_address, safe_factory)
+
+    # Generate the struct hash
     struct_hash = create_struct_hash(
         args.chain_id,
         safe_address,
@@ -136,6 +137,7 @@ def build_safe_transaction_request(
 
     sig = create_safe_signature(signer, struct_hash)
 
+    # Split the sig then pack it into Gnosis accepted rsv format
     packed_sig = split_and_pack_sig(sig)
 
     sig_params = SignatureParams(
@@ -150,15 +152,18 @@ def build_safe_transaction_request(
     if metadata is None:
         metadata = ""
 
-    return TransactionRequest(
-        type=TransactionType.SAFE.value,
+    req = TransactionRequest(
         from_address=args.from_address,
         to=transaction.to,
-        proxy=safe_address,
-        value=transaction.value,
+        proxy_wallet=safe_address,
         data=transaction.data,
         nonce=args.nonce,
         signature=packed_sig,
         signature_params=sig_params,
+        type=TransactionType.SAFE,
         metadata=metadata,
     )
+
+    print("Created Safe Transaction Request:")
+    print(req.to_dict())
+    return req

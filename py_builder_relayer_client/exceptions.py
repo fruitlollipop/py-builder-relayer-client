@@ -1,30 +1,11 @@
-from requests import Response
+"""
+Error definitions for the builder relayer client
+"""
 
+SIGNER_UNAVAILABLE = Exception("signer is needed to interact with this endpoint!")
 
-class RelayerClientException(Exception):
-    def __init__(self, msg):
-        self.msg = msg
+SAFE_DEPLOYED = Exception("safe already deployed!")
 
+SAFE_NOT_DEPLOYED = Exception("safe not deployed!")
 
-class RelayerApiException(RelayerClientException):
-    def __init__(self, resp: Response = None, error_msg=None):
-        if resp is None and error_msg is None:
-            raise ValueError("invalid resp or error msg")
-        if resp is not None:
-            self.status_code = resp.status_code
-            self.error_msg = self._get_message(resp)
-        if error_msg is not None:
-            self.error_msg = error_msg
-            self.status_code = None
-
-    def _get_message(self, resp: Response):
-        try:
-            return resp.json()
-        except Exception:
-            return resp.text
-
-    def __repr__(self):
-        return f"RelayerApiException[status_code={self.status_code}, error_message={self.error_msg}]"
-
-    def __str__(self):
-        return self.__repr__()
+CONFIG_UNSUPPORTED_ON_CHAIN = Exception("config is not supported on the chainId")
